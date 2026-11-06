@@ -1,3 +1,4 @@
+window.AE_SERVICE_URL = "https://script.google.com/macros/s/AKfycbx0p-CEcOzG3O5wip7yeeC541Vq1r4haZ952TC3z7n1fTm3ckl1wFvLjZfFsJD8F5iZEA/exec";
 window.AE_BOOTSTRAP = {
   "version": 1,
   "year": 2027,
