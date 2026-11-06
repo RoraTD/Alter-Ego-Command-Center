@@ -1,56 +1,35 @@
-/* Alter Ego shared data service. Deploy as an Apps Script web app, executing as owner.
-   Set RORA_KEY and PLIX_KEY in Script Properties before running setupAlterEgo(). */
-function setupAlterEgo(){
- var p=PropertiesService.getScriptProperties();
- ['RORA_KEY','PLIX_KEY'].forEach(function(k){if((p.getProperty(k)||'').length<20)throw Error('Set '+k+' to a unique random editor key of at least 20 characters in Script Properties.');});
- if(!p.getProperty('DATA_FILE_ID')){
-  var seed=initialAlterEgoData();seed.revision=0;
-  var file=DriveApp.createFile('Alter Ego Command Center data.json',JSON.stringify(seed),MimeType.PLAIN_TEXT);
-  p.setProperty('DATA_FILE_ID',file.getId());
- }
- return 'Setup complete. Deploy as a web app and use its /exec URL in the Command Center.';
+// ALTER EGO — VIEW-ONLY WEBSITE. Update the private Google Sheet. No keys needed.
+function setupAlterEgo() {
+  var props=PropertiesService.getScriptProperties(),id=props.getProperty('AE_SHEET_ID');
+  if(id){console.log('Your schedule sheet: https://docs.google.com/spreadsheets/d/'+id+'/edit');return;}
+  var seed=initialAlterEgoData(),book=SpreadsheetApp.create('Alter Ego 2027 — Schedule & Attendance');
+  var sheet=book.getSheets()[0];sheet.setName('Schedule');
+  sheet.getRange(1,1,1,9).setValues([['Date','Position','Assigned staff','Shift time','Attendance','Cover staff','Cover attendance','Notes','Shift ID']]);
+  var labels={dj:'DJ',spammer2:'2-hour spammer',spammer1:'1-hour spammer'};
+  var rows=seed.shifts.map(function(s){return [s.date,labels[s.role],s.person,s.time,s.status,s.cover,s.coverStatus,s.notes,s.id];});
+  sheet.getRange(2,1,rows.length,9).setNumberFormat('@').setValues(rows);
+  sheet.setFrozenRows(1);sheet.getRange(1,1,1,9).setBackground('#29203E').setFontColor('#FFFFFF').setFontWeight('bold');
+  sheet.setColumnWidth(1,110);sheet.setColumnWidth(2,140);sheet.setColumnWidths(3,5,170);sheet.setColumnWidth(8,350);sheet.hideColumns(9);
+  sheet.getRange(1,1,rows.length+1,9).createFilter();
+  var rule=SpreadsheetApp.newDataValidation().requireValueInList(['Present','Late','Called out','No-show','Cancelled'],true).setAllowInvalid(false).build();
+  sheet.getRange(2,5,rows.length,1).setDataValidation(rule);sheet.getRange(2,7,rows.length,1).setDataValidation(rule);
+  var staff=book.insertSheet('Staff');staff.getRange(1,1,1,6).setValues([['Name','Color','DJ','Regular spammer','Backup spammer','Active']]).setBackground('#29203E').setFontColor('#FFFFFF').setFontWeight('bold');
+  staff.getRange(2,1,seed.staff.length,6).setValues(seed.staff.map(function(p){return [p.name,p.color,p.dj,p.spammer,p.backup,p.active];}));
+  staff.setFrozenRows(1);staff.setColumnWidth(1,240);staff.setColumnWidths(2,5,150);
+  var names=SpreadsheetApp.newDataValidation().requireValueInRange(staff.getRange('A2:A101'),true).setAllowInvalid(true).build();
+  sheet.getRange(2,3,rows.length,1).setDataValidation(names);sheet.getRange(2,6,rows.length,1).setDataValidation(names);
+  var rules=[];seed.staff.filter(function(p){return p.dj;}).forEach(function(p){rules.push(SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo(p.name).setFontColor(p.color).setBold(true).setRanges([sheet.getRange('C2:C1096'),sheet.getRange('F2:F1096')]).build());});sheet.setConditionalFormatRules(rules);
+  props.setProperty('AE_SHEET_ID',book.getId());console.log('Setup complete. Your schedule sheet: '+book.getUrl());
 }
-function doGet(){try{return response_({ok:true,data:load_()});}catch(e){return response_({ok:false,error:e.message});}}
-function doPost(e){try{
- var req=JSON.parse(e.postData.contents||'{}');
- if(req.action==='login'){
-  if(['Rora','Plix'].indexOf(req.editor)<0)throw Error('Choose Rora or Plix.');
-  var cache=CacheService.getScriptCache(),bucket='fail:'+req.editor;
-  if(Number(cache.get(bucket)||0)>=10)throw Error('Too many unsuccessful attempts. Try again in 15 minutes.');
-  var expected=PropertiesService.getScriptProperties().getProperty(req.editor.toUpperCase()+'_KEY');
-  if(!expected||digest_(expected)!==digest_(String(req.key||''))){cache.put(bucket,String(Number(cache.get(bucket)||0)+1),900);throw Error('Editor name or access key is incorrect.');}
-  cache.remove(bucket);var session=Utilities.getUuid()+Utilities.getUuid();cache.put('session:'+digest_(session),req.editor,21600);
-  return response_({ok:true,editor:req.editor,session:session,data:load_()});
- }
- var editor=CacheService.getScriptCache().get('session:'+digest_(String(req.session||'')));
- if(!editor)throw Error('Your editor session expired. Connect again.');
- if(req.action!=='save')throw Error('Unknown action.');
- var lock=LockService.getScriptLock();if(!lock.tryLock(20000))throw Error('Another save is in progress. Try again shortly.');
- try{
-  var data=load_(),changes=req.changes;
-  if(!Array.isArray(changes)||changes.length>1200)throw Error('Invalid changes.');
-  changes.forEach(function(ch){
-   if(ch.type==='staff'){
-    if(JSON.stringify(data.staff)!==JSON.stringify(ch.before))throw Error('The staff roster changed. Refresh before saving.');
-    if(!Array.isArray(ch.value)||ch.value.length>100)throw Error('Invalid staff list.');
-    var seen={};ch.value.forEach(function(p){if(typeof p.name!=='string'||!p.name.trim()||p.name.length>80||seen[p.name]||!/^#[0-9a-f]{6}$/i.test(p.color))throw Error('Invalid staff member.');seen[p.name]=true;});
-    data.staff=ch.value;return;
-   }
-   var shift=data.shifts.filter(function(s){return s.id===ch.id;})[0];if(!shift)throw Error('Shift not found.');
-   Object.keys(ch.fields||{}).forEach(function(k){
-    if(['person','time','status','cover','coverStatus','notes'].indexOf(k)<0||typeof ch.fields[k]!=='string'||ch.fields[k].length>2000)throw Error('Invalid shift change.');
-    if((k==='status'||k==='coverStatus')&&['','Present','Late','Called out','No-show','Cancelled'].indexOf(ch.fields[k])<0)throw Error('Invalid attendance.');
-    if(!ch.before||shift[k]!==ch.before[k]&&shift[k]!==ch.fields[k])throw Error('Someone else changed this shift. Refresh, review their change and try again.');
-    shift[k]=ch.fields[k];
-   });
-   if(!shift.cover&&shift.coverStatus)throw Error('Choose cover staff before recording cover attendance.');
-  });
-  var at=new Date().toISOString();data.updatedAt=at;data.updatedBy=editor;data.revision=(data.revision||0)+1;
-  data.history=(data.history||[]).concat([{at:at,by:editor,summary:String(req.summary||'Updated schedule').slice(0,200)}]).slice(-500);
-  DriveApp.getFileById(PropertiesService.getScriptProperties().getProperty('DATA_FILE_ID')).setContent(JSON.stringify(data));
-  return response_({ok:true,data:data});
- }finally{lock.releaseLock();}
-}catch(err){return response_({ok:false,error:err.message});}}
-function load_(){var id=PropertiesService.getScriptProperties().getProperty('DATA_FILE_ID');if(!id)throw Error('Run setupAlterEgo in Apps Script first.');return JSON.parse(DriveApp.getFileById(id).getBlob().getDataAsString());}
-function digest_(text){return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,text,Utilities.Charset.UTF_8).map(function(b){return ('0'+(b&255).toString(16)).slice(-2);}).join('');}
-function response_(value){return ContentService.createTextOutput(JSON.stringify(value)).setMimeType(ContentService.MimeType.JSON);}
+function doGet() {
+  try {
+    var id=PropertiesService.getScriptProperties().getProperty('AE_SHEET_ID');if(!id)throw Error('Run setupAlterEgo first.');
+    var book=SpreadsheetApp.openById(id),roleMap={'DJ':'dj','2-hour spammer':'spammer2','1-hour spammer':'spammer1'};
+    var shifts=book.getSheetByName('Schedule').getDataRange().getDisplayValues().slice(1).filter(function(r){return r[8];}).map(function(r){return {id:r[8],date:r[0],role:roleMap[r[1]],person:r[2],time:r[3],status:r[4],cover:r[5],coverStatus:r[6],notes:r[7]};});
+    var staff=book.getSheetByName('Staff').getDataRange().getValues().slice(1).filter(function(r){return r[0];}).map(function(r){return {name:String(r[0]),color:String(r[1]),dj:truth_(r[2]),spammer:truth_(r[3]),backup:truth_(r[4]),active:truth_(r[5])};});
+    return json_({ok:true,data:{version:1,year:2027,shifts:shifts,staff:staff,history:[],spreadsheetUrl:book.getUrl(),updatedAt:null,updatedBy:null}});
+  }catch(e){return json_({ok:false,error:e.message});}
+}
+function doPost(){return json_({ok:false,error:'This website is view-only. Update the schedule in your Google Sheet.'});}
+function truth_(v){return v===true||String(v).toLowerCase()==='true';}
+function json_(v){return ContentService.createTextOutput(JSON.stringify(v)).setMimeType(ContentService.MimeType.JSON);}
